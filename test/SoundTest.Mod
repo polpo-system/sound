@@ -1,6 +1,6 @@
-MODULE SoundTest;  (** SoundTest.Run: conversions and WAV files; silence on the sound device if there is one *)
+MODULE SoundTest;  (** SoundTest.Run: conversions, WAV and MP3 files; silence on the sound device if there is one *)
 
-IMPORT SYSTEM, Files, Out, Sound0, Wave0;
+IMPORT SYSTEM, Files, Out, Sound0, Wave0, MPEGAudio0;
 
 VAR
   fails, checks: LONGINT;
@@ -169,6 +169,36 @@ BEGIN
   Check("compressed refused", ~Wave0.ReadFormat(f, fmt))
 END Waves;
 
+(* name.mp3 decoded against name.wav, its decoding by mpg123: the same length, samples within 8 *)
+PROCEDURE Mp3(name: ARRAY OF CHAR);
+VAR f, g: Files.File; d: MPEGAudio0.Decoder; fmt: Wave0.Format; rd: Wave0.Reader; a, b: ARRAY 64 OF CHAR;
+  n, m, i, max, diff: LONGINT; same: BOOLEAN;
+BEGIN
+  COPY(name, a); COPY(name, b); i := 0; WHILE a[i] # 0X DO INC(i) END;
+  a[i] := "."; a[i + 1] := "m"; a[i + 2] := "p"; a[i + 3] := "3"; a[i + 4] := 0X;
+  b[i] := "."; b[i + 1] := "w"; b[i + 2] := "a"; b[i + 3] := "v"; b[i + 4] := 0X;
+  f := Files.Old(a); g := Files.Old(b);
+  IF (f = NIL) OR (g = NIL) OR ~MPEGAudio0.Open(f, d) OR ~Wave0.ReadFormat(g, fmt) THEN
+    Check(a, FALSE); Out.String("  "); Out.String(MPEGAudio0.lastError); Out.Ln; RETURN
+  END;
+  Wave0.OpenReader(rd, g, fmt); max := 0; same := (d.rate = fmt.rate) & (d.channels = fmt.channels);
+  LOOP
+    n := MPEGAudio0.Read(d, in, 0, LEN(in)); m := Wave0.Read(rd, out, 0, n);
+    IF m # n THEN same := FALSE END;
+    i := 0; WHILE i < m DO diff := ABS(Get16(in, i) - Get16(out, i)); IF diff > max THEN max := diff END; INC(i, 2) END;
+    IF n = 0 THEN EXIT END
+  END;
+  IF Wave0.Read(rd, out, 0, LEN(out)) # 0 THEN same := FALSE END;
+  Check(a, same);
+  IF max > 8 THEN Out.String("  "); Out.String(a); Out.String(": a sample differs by"); Out.Int(max, 6); Out.Ln END;
+  Check(a, max <= 8)
+END Mp3;
+
+PROCEDURE Mp3s;
+BEGIN
+  Mp3("sound-mpeg1"); Mp3("sound-mpeg2"); Mp3("sound-mpeg25"); Mp3("sound-short")
+END Mp3s;
+
 (* silence played and some frames recorded, if a device is there *)
 PROCEDURE Device;
 VAR d: Sound0.Device; m: Sound0.Mixer; i, n, x: LONGINT;
@@ -203,15 +233,15 @@ END Device;
 PROCEDURE Run*;
 BEGIN
   fails := 0; checks := 0;
-  Conversions; Waves; Device;
+  Conversions; Waves; Mp3s; Device;
   Out.String("SoundTest: "); Out.Int(checks, 0); Out.String(" checks, "); Out.Int(fails, 0); Out.String(" failed"); Out.Ln
 END Run;
 
-(** the offline checks only, for the recipe: a test machine may have no free sound device *)
+(** the checks without the device, for the recipe: a test machine may have no free sound device *)
 PROCEDURE Offline*;
 BEGIN
   fails := 0; checks := 0;
-  Conversions; Waves;
+  Conversions; Waves; Mp3s;
   Out.String("SoundTest: "); Out.Int(checks, 0); Out.String(" checks, "); Out.Int(fails, 0); Out.String(" failed"); Out.Ln
 END Offline;
 

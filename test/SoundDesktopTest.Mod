@@ -1,4 +1,4 @@
-MODULE SoundDesktopTest;  (** SoundDesktopTest.Run: Sound, Wave and MixerPanel; needs the desktop's display *)
+MODULE SoundDesktopTest;  (** SoundDesktopTest.Run: Sound, Wave, Player and MixerPanel; needs the desktop's display *)
 
 IMPORT Modules, Objects, Documents, Panels, Out, Sound, MixerPanel;
 
@@ -15,6 +15,7 @@ VAR d: Sound.AudioDef; obj: Objects.Object; track, min, sec: INTEGER;
 BEGIN
   fails := 0; checks := 0;
   Check("Wave loaded", Modules.ThisMod("Wave") # NIL);
+  Check("Player loaded", Modules.ThisMod("Player") # NIL);
   Sound.PlayAudio(); Check("not opened", Sound.res = Sound.NotOpened);
   d.format := Sound.PCM; d.stereo := TRUE; d.signed := TRUE; d.bits := 12; d.freq := 22050; d.blocks := 1; d.handle := NIL;
   Sound.OpenAudio(d); Check("12 bits refused", Sound.res = Sound.NS16bit);
