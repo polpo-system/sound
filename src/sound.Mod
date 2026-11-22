@@ -1,10 +1,17 @@
-MODULE sound;  (** console commands for sound: WAV files and tones played, recording, the mixer *)
+MODULE sound;  (** console commands for sound: WAV and MP3 files and tones played, recording, the mixer *)
 
-IMPORT Files, Texts, Texts0, Oberon0, Out, Math, Sound0, Wave0;
+IMPORT Files, Texts, Texts0, Oberon0, Out, Math, Sound0, Wave0, MPEGAudio0;
 
 CONST
   Chunk = 16384;
   ToneRate = 48000;
+
+TYPE
+  Source = RECORD  (* a WAV or an MP3 file being read *)
+    mp3: MPEGAudio0.Decoder;
+    wave: Wave0.Reader;
+    rate, channels, bits, frames: LONGINT
+  END;
 
 VAR
   dev: Sound0.Device;  (* the device of the running command, for Stop *)
@@ -61,21 +68,50 @@ BEGIN
   IF s MOD 60 < 10 THEN Out.Char("0") END; Out.Int(s MOD 60, 0)
 END Time;
 
-PROCEDURE PlayFile(name: ARRAY OF CHAR): BOOLEAN;
-VAR f: Files.File; fmt: Wave0.Format; rd: Wave0.Reader; n: LONGINT;
+PROCEDURE NameError(name, s: ARRAY OF CHAR);
+BEGIN Out.String(name); Out.String(": "); Out.String(s); Out.Ln
+END NameError;
+
+(* opens the WAV or MP3 file name and says what it is *)
+PROCEDURE OpenSource(name: ARRAY OF CHAR; VAR s: Source): BOOLEAN;
+VAR f: Files.File; fmt: Wave0.Format;
 BEGIN
-  f := Files.Old(name);
-  IF f = NIL THEN Out.String(name); Out.String(": no such file"); Out.Ln; RETURN FALSE END;
-  IF ~Wave0.ReadFormat(f, fmt) THEN Out.String(name); Out.String(": "); Out.String(Wave0.lastError); Out.Ln; RETURN FALSE END;
-  Wave0.OpenReader(rd, f, fmt);
-  Out.String(name); Out.String(": "); Out.Int(fmt.rate, 0); Out.String(" Hz, ");
-  IF fmt.channels = 1 THEN Out.String("mono, ") ELSE Out.String("stereo, ") END;
-  Out.Int(fmt.bits, 0); IF fmt.float THEN Out.String(" bits float, ") ELSE Out.String(" bits, ") END;
-  Time(fmt.frames, fmt.rate); Out.Ln;
-  IF ~Sound0.Open(device, FALSE, fmt.rate, fmt.channels, rd.outBits, dev) THEN Error(Sound0.lastError); RETURN FALSE END;
+  f := Files.Old(name); s.mp3 := NIL;
+  IF f = NIL THEN NameError(name, "no such file"); RETURN FALSE END;
+  IF Wave0.ReadFormat(f, fmt) THEN
+    Wave0.OpenReader(s.wave, f, fmt);
+    s.rate := fmt.rate; s.channels := fmt.channels; s.bits := s.wave.outBits; s.frames := fmt.frames
+  ELSIF Wave0.lastError # "not a WAV file" THEN NameError(name, Wave0.lastError); RETURN FALSE
+  ELSIF MPEGAudio0.Open(f, s.mp3) THEN
+    s.rate := s.mp3.rate; s.channels := s.mp3.channels; s.bits := 16; s.frames := s.mp3.samples
+  ELSE NameError(name, "neither a WAV nor an MP3 file"); RETURN FALSE
+  END;
+  Out.String(name); Out.String(": "); Out.Int(s.rate, 0); Out.String(" Hz, ");
+  IF s.channels = 1 THEN Out.String("mono, ") ELSE Out.String("stereo, ") END;
+  IF s.mp3 # NIL THEN
+    Out.String("MP3 (MPEG-");
+    IF s.mp3.version = 3 THEN Out.String("2.5") ELSE Out.Int(s.mp3.version, 0) END; Out.String("), ");
+    IF s.mp3.bitrate = 0 THEN Out.String("variable bit rate, ") ELSE Out.Int(s.mp3.bitrate, 0); Out.String(" kbit/s, ") END
+  ELSE
+    Out.Int(fmt.bits, 0); IF fmt.float THEN Out.String(" bits float, ") ELSE Out.String(" bits, ") END
+  END;
+  Time(s.frames, s.rate); Out.Ln;
+  RETURN TRUE
+END OpenSource;
+
+PROCEDURE ReadSource(VAR s: Source; VAR data: ARRAY OF CHAR; len: LONGINT): LONGINT;
+BEGIN
+  IF s.mp3 # NIL THEN RETURN MPEGAudio0.Read(s.mp3, data, 0, len) ELSE RETURN Wave0.Read(s.wave, data, 0, len) END
+END ReadSource;
+
+PROCEDURE PlayFile(name: ARRAY OF CHAR): BOOLEAN;
+VAR s: Source; n: LONGINT;
+BEGIN
+  IF ~OpenSource(name, s) THEN RETURN FALSE END;
+  IF ~Sound0.Open(device, FALSE, s.rate, s.channels, s.bits, dev) THEN Error(Sound0.lastError); RETURN FALSE END;
   Oberon0.OnStop(Stop);
   LOOP
-    n := Wave0.Read(rd, buf, 0, Chunk);
+    n := ReadSource(s, buf, Chunk);
     IF n <= 0 THEN EXIT END;
     IF ~Sound0.Write(dev, buf, 0, n) THEN Error(Sound0.lastError); Stop; RETURN FALSE END
   END;
@@ -83,14 +119,30 @@ BEGIN
   RETURN TRUE
 END PlayFile;
 
-(** sound.Play [/d device] file.wav ...  plays WAV files *)
+(** sound.Play [/d device] file ...  plays WAV and MP3 files *)
 PROCEDURE Play*;
 VAR R: Texts.Reader; a: ARRAY 256 OF CHAR; v: ARRAY 1 OF LONGINT;
 BEGIN
   Texts.OpenArgs(R);
-  IF ~Args(R, "", v, a) THEN Out.String("usage: sound.Play [/d device] file.wav ...  (plays WAV files)"); Out.Ln; RETURN END;
+  IF ~Args(R, "", v, a) THEN Out.String("usage: sound.Play [/d device] file ...  (plays WAV and MP3 files)"); Out.Ln; RETURN END;
   REPEAT IF ~PlayFile(a) THEN RETURN END UNTIL ~Texts.Arg(R, a)
 END Play;
+
+(** sound.Convert from to.wav  writes a WAV or MP3 file as a WAV file (16 bits, 8 for one of 8) *)
+PROCEDURE Convert*;
+VAR R: Texts.Reader; a, b: ARRAY 256 OF CHAR; v: ARRAY 1 OF LONGINT; s: Source; f: Files.File; r: Files.Rider;
+  n, total: LONGINT;
+BEGIN
+  Texts.OpenArgs(R);
+  IF ~Args(R, "", v, a) OR ~Texts.Arg(R, b) THEN
+    Out.String("usage: sound.Convert from to.wav  (a WAV or MP3 file as a WAV file)"); Out.Ln; RETURN
+  END;
+  IF ~OpenSource(a, s) THEN RETURN END;
+  f := Files.New(b); Files.Set(r, f, 0); Wave0.WriteHeader(r, s.rate, s.channels, s.bits); total := 0;
+  LOOP n := ReadSource(s, buf, Chunk); IF n <= 0 THEN EXIT END; Files.WriteBytes(r, buf, n); INC(total, n) END;
+  Wave0.Finish(f, total); Files.Register(f);
+  Out.String(b); Out.String(": "); Time(total DIV (s.channels * s.bits DIV 8), s.rate); Out.Ln
+END Convert;
 
 (* n samples of a tone of freq Hz (0: silence) at amplitude amp into buf, 16 bits mono, from sample
   at of a tone of len samples; fades of 5 ms at both ends *)
@@ -281,8 +333,9 @@ END Info;
 
 PROCEDURE Help*;
 BEGIN
-  Out.String("sound: WAV files and tones played, recording, the mixer"); Out.Ln; Out.Ln;
-  Out.String("  sound.Play [/d device] file.wav ...      plays WAV files (8 to 32 bits, mono or stereo)"); Out.Ln;
+  Out.String("sound: WAV and MP3 files and tones played, recording, the mixer"); Out.Ln; Out.Ln;
+  Out.String("  sound.Play [/d device] file ...          plays WAV files (8 to 32 bits) and MP3 files"); Out.Ln;
+  Out.String("  sound.Convert from to.wav                a WAV or MP3 file as a WAV file of 16 bits"); Out.Ln;
   Out.String("  sound.Tone [/d device] [/v volume] freq ms ...   tones in Hz for ms milliseconds;"); Out.Ln;
   Out.String("      freq 0 is a rest, volume in per cent (30)"); Out.Ln;
   Out.String("  sound.Record [/d device] [/r rate] [/c channels] [/b bits] seconds file.wav"); Out.Ln;
